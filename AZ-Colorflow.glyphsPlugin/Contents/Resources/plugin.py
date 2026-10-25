@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import colorsys
+import os
 import shutil
 import time
 import traceback
@@ -2853,7 +2854,8 @@ def _ask_label_scope() -> None:
 class AZColorflowLoader(GeneralPlugin):
     """Registers the Settings pane, the Font-view sidebar bars, the Font Glyph Order
     refresher, the color wheel, the report's File-menu item and the color history's
-    save observer, each once per session, then asks the label-scope question."""
+    save observer, each once per session, then asks the label-scope question. Under
+    glyphs-cli it registers nothing: scripts there call ``azcolorflow.save_report``."""
 
     @objc.python_method
     def settings(self) -> None:
@@ -2861,6 +2863,9 @@ class AZColorflowLoader(GeneralPlugin):
 
     @objc.python_method
     def start(self) -> None:
+        # glyphs-cli runs plugins headless: no menus, windows or alerts to hook into.
+        if os.environ.get("GLYPHS_HEADLESS"):
+            return
         for label, register in (
             ("prefs pane", _register_preferences_pane),
             ("Font-view row bars", _register_fontview_row_bars),

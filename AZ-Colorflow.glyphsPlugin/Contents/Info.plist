@@ -13,9 +13,9 @@
 	<key>CFBundleName</key>
 	<string>AZ Colorflow</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1</string>
+	<string>0.11</string>
 	<key>CFBundleVersion</key>
-	<string>0.1</string>
+	<string>0.11</string>
 	<key>MinGlyphsVersion</key>
 	<integer>4</integer>
 	<key>UpdateFeedURL</key>
@@ -23,7 +23,7 @@
 	<key>productPageURL</key>
 	<string>https://github.com/azerty-typefaces/AZ-Colorflow</string>
 	<key>productReleaseNotes</key>
-	<string>AZ Colorflow for Glyphs 4: name and order your color-label steps in Settings, see each Font View sidebar row fill up as a color bar, group the Font View by color with Font Glyph Order, and color your selection from a wheel at the cursor. Replaces Color Flow: disable it.</string>
+	<string>AZ Colorflow for Glyphs 4: name and order your color-label steps in Settings, see each Font View sidebar row fill up as a color bar, group the Font View by color with Font Glyph Order, color your selection from a wheel at the cursor, and chart your progress with File ▸ Open Colorflow Report…, also from a script. Replaces Color Flow: disable it.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright, HugoJourdan, 2022–2026</string>
 	<key>NSPrincipalClass</key>

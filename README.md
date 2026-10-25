@@ -98,6 +98,25 @@ The chart needs a history. The first time you open the report on a font, AZ Colo
 
 A font tracked in git is never asked and nothing goes into its file: the history comes from its commits (the 300 most recent), each opened once and then cached on your Mac.
 
+### From a script
+
+`save_report` writes the same report from a script, in the Macro Panel or in the Terminal with [glyphs-cli](https://pypi.org/project/glyphs-cli/). It opens nothing and asks nothing. Give it a folder and the report takes its usual name (`20261025 MyFont — AZ Colorflow.html`), or give it a file path. It returns the path it wrote.
+
+```python
+# report.py
+import sys
+
+from azcolorflow import save_report
+
+print(save_report(Font, sys.argv[1]))
+```
+
+```
+glyphs run --plugins AZ-Colorflow report.py -i MyFont.glyphs -- ~/Desktop/Reports/
+```
+
+`--plugins AZ-Colorflow` loads only AZ Colorflow: glyphs-cli loads every plugin by default, and a plugin that needs a window stops the run. A report made from a script leaves the "since your last report" starting point where it was.
+
 <br>
 
 ## Settings

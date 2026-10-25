@@ -8,32 +8,203 @@ no dependencies. The model is the single source of truth the JS app renders.
 from __future__ import annotations
 
 import base64
+import functools
 import gzip
 import json
 import re
+from pathlib import Path
 from xml.sax.saxutils import escape as xesc
 
-# A self-contained ``data:image/...`` URI, restricted to characters that are safe
-# to drop into a double-quoted ``href`` attribute. The payload allowlist covers
-# base64 (``A-Za-z0-9+/=``) and percent-encoded SVG markup, but deliberately
-# excludes ``"`` ``'`` ``<`` ``>`` ``&`` ``\`` and every whitespace/control char,
-# so a hostile favicon value cannot close the attribute or inject new ones.
-_DATA_IMAGE_URI = re.compile(
-    r"data:image/[a-zA-Z0-9.+-]+"  # image/<subtype>, e.g. png, svg+xml, x-icon
-    r"(?:;[a-zA-Z0-9.+=-]+)*"  # optional parameters (e.g. ;charset=utf-8;base64)
-    r",[A-Za-z0-9+/=%_.!~*()-]+\Z"  # required comma + non-empty payload
-)
+import colornames
+
+# Python's base85 alphabet, with "<" (the only character that could start a tag inside
+# the raw-text <script> element) written as ".", which the alphabet doesn't use.
+_B85_SAFE = str.maketrans("<", ".")
+
+
+def _packed(element_id: str, text: str) -> str:
+    """``text`` gzipped and base85'd in a non-executed ``<script>`` block, which the
+    page's ``cfdUnpack`` decompresses: a quarter of overhead where base64 has a
+    third, and no ``<`` that could end the element."""
+    payload = base64.b85encode(gzip.compress(text.encode("utf-8"), compresslevel=9))
+    return f'<script type="application/octet-stream" id="{element_id}">{payload.decode("ascii").translate(_B85_SAFE)}</script>'
 
 
 def embed_model(model: dict) -> str:
-    """Serialise the model, gzip it, and embed as base64 in a non-executed
-    ``<script>`` block. The client decompresses it with ``DecompressionStream``.
-    base64's alphabet (``A-Za-z0-9+/=``) contains no ``<`` ``>`` ``&`` ``"``, so
-    it can't terminate the script element or break any attribute — no escaping
-    needed — and it shrinks the (outline-heavy) model ~4-5x on disk."""
-    raw = json.dumps(model, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    payload = base64.b64encode(gzip.compress(raw, compresslevel=9)).decode("ascii")
-    return f'<script type="application/octet-stream" id="cfd-model-gz">{payload}</script>'
+    """The model as JSON in a packed block."""
+    return _packed("cfd-model-gz", json.dumps(model, ensure_ascii=False, separators=(",", ":")))
+
+
+def _keys_at(per_glyph: dict, names: list, day: str) -> list:
+    """Each of ``names``' color on ``day``, from one master's journey events: what the
+    page rebuilds ``masters[].keys`` from when they are left out."""
+    keys = []
+    for name in names:
+        key = colornames.NO_COLOR
+        for date, event_key in per_glyph.get(name, ()):
+            if date > day:
+                break
+            key = event_key
+        keys.append(key)
+    return keys
+
+
+def _pack_journey(index: dict, dates: list, names: list) -> dict:
+    """The journey index column by column, glyph-major: for each glyph (``names``, then
+    those in ``extra``, which the font no longer has), each master's event count, then
+    the events' dates (positions in ``dates``, as steps from the previous event) and
+    keys. Masters progress alike, so gzip finds long runs."""
+    day = {date: i for i, date in enumerate(dates)}
+    masters, known = list(index), set(names)
+    extra = list(
+        dict.fromkeys(
+            name for per_glyph in index.values() for name in per_glyph if name not in known
+        )
+    )
+    counts, steps, keys = [], [], []
+    for name in [*names, *extra]:
+        for master_id in masters:
+            events = index[master_id].get(name, ())
+            counts.append(len(events))
+            previous = 0
+            for date, key in events:
+                steps.append(day[date] - previous)
+                keys.append(key)
+                previous = day[date]
+    return {"masters": masters, "extra": extra, "counts": counts, "steps": steps, "keys": keys}
+
+
+def _pack_series(series: list) -> dict:
+    """The trend points' per-master ``{final, started, total}`` as ``[final, started,
+    total]`` in one master order (0 where a point has no such master); each point's
+    date is ``trend.dates`` at the same position."""
+    ids = list(dict.fromkeys(master_id for point in series for master_id in point["masters"]))
+    points = [
+        [
+            [counts["final"], counts["started"], counts["total"]]
+            if (counts := point["masters"].get(master_id))
+            else 0
+            for master_id in ids
+        ]
+        for point in series
+    ]
+    return {"ids": ids, "points": points}
+
+
+def _pack_pairs(pairs: dict, position: dict, keys: list | None) -> dict | list:
+    """One master's ``changes`` as ``[[glyph positions], [old keys]]`` when every new key
+    is the glyph's current one (``keys``), which the page fills back in; else as is."""
+    if keys is None or not all(
+        name in position and keys[position[name]] == new for name, (_old, new) in pairs.items()
+    ):
+        return pairs
+    return [[position[name] for name in pairs], [old for old, _new in pairs.values()]]
+
+
+def _pack_model(model: dict) -> dict:
+    """The model as the page receives it, smaller but lossless: the page's
+    ``unpackModel`` restores each field before anything reads it. The journey index
+    and the trend points go column by column; ``masters[].keys`` is left out where it
+    equals the journey's state today, and ``changes`` loses its new keys where they
+    equal those."""
+    packed = dict(model)
+    names = model.get("glyphNames") or []
+    trend = model.get("trend") or {}
+    dates, today = trend.get("dates") or [], trend.get("today")
+    index = model.get("journeyIndex") or {}
+    if trend.get("series"):
+        packed["trend"] = {**trend, "series": _pack_series(trend["series"])}
+    if index and dates:
+        packed["journeyIndex"] = _pack_journey(index, dates, names)
+    masters = model.get("masters") or []
+    if index and today:
+        packed["masters"] = [
+            {key: value for key, value in master.items() if key != "keys"}
+            if master.get("keys") == _keys_at(index.get(master["id"], {}), names, today)
+            else master
+            for master in masters
+        ]
+    if model.get("changes"):
+        position = {name: i for i, name in enumerate(names)}
+        keys = {master["id"]: master.get("keys") for master in masters}
+        packed["changes"] = {
+            master_id: _pack_pairs(pairs, position, keys.get(master_id))
+            for master_id, pairs in model["changes"].items()
+        }
+    return packed
+
+
+def _compact(code: str) -> str:
+    """``code`` without comments, indentation and blank lines. Line-based, so only for
+    DASHBOARD_CSS, DASHBOARD_JS and _BOOT_JS: no template literals, line continuations
+    or comment markers inside strings there (a test keeps it so)."""
+    code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)
+    lines = (line.strip() for line in code.splitlines())
+    return "\n".join(line for line in lines if line and not line.startswith("//"))
+
+
+# Painted until the stylesheet is unpacked: DASHBOARD_CSS's own background and hidden
+# body, so the page never flashes white (a test keeps the two in step).
+_FIRST_PAINT_CSS = "body{background:#0a0b0e;opacity:0}"
+
+# Defines cfdUnpack (base85 text -> gunzipped string), then unpacks the stylesheet, the
+# favicon and the app script, which boots whether or not the page has finished
+# loading. The stylesheet goes right after the first-paint style, so the label-color
+# overrides after it still win. Without gzip support the page says so instead of
+# staying blank (the body is transparent until "ready").
+_BOOT_JS = """
+(function () {
+  var A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;.=>?@^_`{|}~", D = {};
+  for (var i = 0; i < 85; i++) D[A.charAt(i)] = i;
+  window.cfdUnpack = function (id) {
+    var text = document.getElementById(id).textContent, n = text.length, pad = (5 - n % 5) % 5;
+    var bytes = new Uint8Array(Math.ceil(n / 5) * 4), o = 0;
+    for (var p = 0; p < n; p += 5) {
+      var v = 0;
+      for (var j = p; j < p + 5; j++) v = v * 85 + (j < n ? D[text.charAt(j)] : 84);
+      bytes[o++] = v >>> 24; bytes[o++] = v >>> 16 & 255; bytes[o++] = v >>> 8 & 255; bytes[o++] = v & 255;
+    }
+    var stream = new Blob([bytes.subarray(0, o - pad)]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return new Response(stream).text();
+  };
+  function fail() {
+    document.body.classList.add("ready");
+    document.getElementById("cfd-app").textContent = "This report needs a modern browser.";
+  }
+  try {
+    cfdUnpack("cfd-app-gz").then(function (text) {
+      var parts = text.split("\\u0000"), head = document.head;
+      var style = document.createElement("style");
+      style.textContent = parts[0];
+      head.insertBefore(style, document.getElementById("cfd-first").nextSibling);
+      if (parts[2]) {
+        var icon = document.createElement("link");
+        icon.rel = "icon";
+        icon.href = "data:image/svg+xml," + encodeURIComponent(parts[2]);
+        head.appendChild(icon);
+      }
+      var script = document.createElement("script");
+      script.textContent = parts[1];
+      document.body.appendChild(script);
+    }, fail);
+  } catch (error) {
+    fail();
+  }
+})();
+"""
+
+
+@functools.cache
+def _app_assets() -> str:
+    """The stylesheet, the app script and the favicon (``favicon.svg`` beside this
+    module, if any), compacted and packed in one block, then the inline script that
+    unpacks them. The same for every report, so built once."""
+    try:
+        favicon = (Path(__file__).parent / "favicon.svg").read_text(encoding="utf-8").strip()
+    except OSError:
+        favicon = ""
+    assets = "\0".join((_compact(DASHBOARD_CSS), _compact(DASHBOARD_JS), favicon))
+    return f"{_packed('cfd-app-gz', assets)}<script>{_compact(_BOOT_JS)}</script>"
 
 
 def _color_overrides(model: dict) -> str:
@@ -47,33 +218,17 @@ def _color_overrides(model: dict) -> str:
     return f"<style>:root{{{rules}}}</style>"
 
 
-def _favicon_link(model: dict) -> str:
-    """A ``<link rel="icon">`` carrying the bundled brand favicon as a self-contained
-    ``data:`` URI (built by the model). Empty when the model has none, or when the
-    value isn't a well-formed ``data:image/...`` URI — the favicon is interpolated
-    raw into the ``href`` attribute, so anything that could close the attribute or
-    add new ones (a ``"``, ``<``, ``>`` or whitespace) is rejected outright rather
-    than escaped, to keep an attacker-supplied value from breaking the markup."""
-    favicon = model.get("favicon")
-    if not favicon or not isinstance(favicon, str):
-        return ""
-    if not _DATA_IMAGE_URI.fullmatch(favicon):
-        return ""
-    return f'<link rel="icon" href="{favicon}">'
-
-
 def build_html(model: dict) -> str:
     """Assemble the complete, self-contained dashboard page from a model."""
     title = xesc(f"{model.get('family') or 'Untitled'} - Colorflow")
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{title}</title>{_favicon_link(model)}"
-        f"<style>{DASHBOARD_CSS}</style>{_color_overrides(model)}</head>"
+        f'<title>{title}</title><style id="cfd-first">{_FIRST_PAINT_CSS}</style>'
+        f"{_color_overrides(model)}</head>"
         '<body><div id="cfd-app"></div>'
         "<noscript>This report needs JavaScript — please open it in a modern browser.</noscript>"
-        f"{embed_model(model)}"
-        f"<script>{DASHBOARD_JS}</script>"
+        f"{embed_model(_pack_model(model))}{_app_assets()}"
         "</body></html>"
     )
 
@@ -1303,6 +1458,54 @@ DASHBOARD_JS = r"""
   }
   // ----- Shared journey substrate: reconstruct color state from the sparse
   // change-event index (journeyIndex[masterId][glyphName] = [[date,key],...]) ----
+  // The model ships packed (azcolorflow_assets._pack_model). Expanded once, on load,
+  // into what everything below reads: the journey index (columns, glyph-major, dates as
+  // steps through H.trend.dates), the trend points ([final, started, total] per master,
+  // 0 = absent), masters[].keys (left out when they equal the journey's state today)
+  // and changes ([[glyph positions], [old keys]]: the new key is the current one).
+  function unpackModel(){
+    var dates = (H.trend && H.trend.dates) || [], names = H.glyphNames || [], ji = H.journeyIndex;
+    if (ji && ji.counts){
+      var glyphs = names.concat(ji.extra), out = {}, c = 0, e = 0, g, m, i;
+      ji.masters.forEach(function(id){ out[id] = {}; });
+      for (g=0;g<glyphs.length;g++){
+        for (m=0;m<ji.masters.length;m++){
+          var count = ji.counts[c++], events = [], day = 0;
+          if (!count) continue;
+          for (i=0;i<count;i++,e++){ day += ji.steps[e]; events.push([dates[day], ji.keys[e]]); }
+          out[ji.masters[m]][glyphs[g]] = events;
+        }
+      }
+      H.journeyIndex = out;
+    }
+    var series = H.trend && H.trend.series;
+    if (series && series.ids){
+      H.trend.series = series.points.map(function(row, j){
+        var masters = {};
+        row.forEach(function(p, i){ if (p) masters[series.ids[i]] = {final:p[0], started:p[1], total:p[2]}; });
+        return {date:dates[j], masters:masters};
+      });
+    }
+    var today = H.trend && H.trend.today, keysOf = {};
+    (H.masters||[]).forEach(function(mm){
+      if (!mm.keys){
+        var per = (H.journeyIndex && H.journeyIndex[mm.id]) || {};
+        mm.keys = names.map(function(n){
+          var ev = per[n] || [], key = -1;
+          for (var k=0;k<ev.length && ev[k][0] <= today;k++) key = ev[k][1];
+          return key;
+        });
+      }
+      keysOf[mm.id] = mm.keys;
+    });
+    for (var id in (H.changes||{})){
+      var ch = H.changes[id];
+      if (!Array.isArray(ch)) continue;
+      var pairs = {};
+      for (i=0;i<ch[0].length;i++) pairs[names[ch[0][i]]] = [ch[1][i], keysOf[id][ch[0][i]]];
+      H.changes[id] = pairs;
+    }
+  }
   function stateAt(masterId, iso){
     var perMaster = H.journeyIndex && H.journeyIndex[masterId];
     var out = {};
@@ -2261,22 +2464,17 @@ DASHBOARD_JS = r"""
     // tagging them ".intro" so later re-renders don't re-animate.
     requestAnimationFrame(function(){ document.body.classList.add("ready"); });
   }
-  // Decompress the gzipped model (base64 -> bytes -> gunzip stream -> JSON),
-  // then boot. embed_model only ever emits the gzipped block; if it's missing the
-  // page is corrupt, so fail loudly rather than silently null-deref a plain block.
-  function b64bytes(b64){ var bin=atob(b64), n=bin.length, a=new Uint8Array(n); for (var i=0;i<n;i++) a[i]=bin.charCodeAt(i); return a; }
+  // Decompress the packed model with the boot script's cfdUnpack, then boot.
+  // embed_model only ever emits the packed block; if it's missing the page is corrupt,
+  // so fail loudly rather than silently null-deref a plain block.
   function loadModel(){
-    var gz = document.getElementById("cfd-model-gz");
-    if (!gz)
+    if (!document.getElementById("cfd-model-gz"))
       return Promise.reject(new Error("Report data block is missing — this file looks incomplete."));
-    if (typeof DecompressionStream==="undefined" || typeof Response==="undefined" || typeof Blob==="undefined")
-      return Promise.reject(new Error("This report needs a modern browser (gzip decompression)."));
-    var stream = new Blob([b64bytes(gz.textContent.trim())]).stream().pipeThrough(new DecompressionStream("gzip"));
-    return new Response(stream).text().then(function(t){ return JSON.parse(t); });
+    return cfdUnpack("cfd-model-gz").then(function(t){ return JSON.parse(t); });
   }
   function start(){
     loadModel().then(function(model){
-      H = model; normalizeHiddenKeys(); lastOrder = H.order.length ? H.order[H.order.length-1] : null;
+      H = model; unpackModel(); normalizeHiddenKeys(); lastOrder = H.order.length ? H.order[H.order.length-1] : null;
       // H.trend is per day (each day's last save; today is the live state): saves on one day
       // are one version everywhere — the chart, the calendar, the arrows, Recent updates.
       init();

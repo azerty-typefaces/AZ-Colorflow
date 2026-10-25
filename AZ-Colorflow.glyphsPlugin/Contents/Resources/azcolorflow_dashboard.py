@@ -26,7 +26,6 @@ snapshot helpers and ``main`` touch the running app.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import re
 import tempfile
@@ -34,7 +33,6 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import cast
-from urllib.parse import quote
 
 import azcolorflow_assets
 import azcolorflow_git
@@ -712,24 +710,6 @@ def _hex(rgba: tuple) -> str:
     return "#" + "".join(f"{round(min(1.0, max(0.0, channel)) * 255):02x}" for channel in rgba[:3])
 
 
-def _favicon_data_uri() -> str:
-    """The bundled brand favicon as a self-contained ``data:`` URI. Prefers
-    ``favicon.gif`` (base64), then ``favicon.png`` (base64), and falls back to
-    ``favicon.svg`` (URL-encoded) beside this module. ``""`` when none present."""
-    here = Path(__file__).parent
-    for name, mime in (("favicon.gif", "image/gif"), ("favicon.png", "image/png")):
-        try:
-            data = (here / name).read_bytes()
-        except OSError:
-            continue
-        return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
-    try:
-        text = (here / "favicon.svg").read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    return "data:image/svg+xml," + quote(re.sub(r">\s+<", "><", text).strip())
-
-
 def _glyph_groups(font, attr: str) -> dict[str, list[str]]:
     """``{group_value: [glyph_name]}`` grouping all glyphs by a per-glyph
     attribute (``script`` or ``category``); a missing/blank value -> ``"Other"``."""
@@ -973,23 +953,8 @@ def build_model(
         "today": today,
     }
     journey_index = build_journey_index(history, dates)
-
-    # Fine-grain timeline: every checkpoint is its own point (each commit, or each
-    # save). The report ships it as the "commit" dataset plus a ``fineKind`` tag so the
-    # granularity toggle can label itself ("With commits" vs "Per save").
-    commit_trend = commit_journey_index = None
-    fine_kind = None
-    if log:
-        fine_kind = "save" if git_commits is None else "commit"
-        fine_history = {**log, now.strftime("%Y-%m-%dT%H:%M:%S"): current}
-        commit_series = history_series(fine_history, order)
-        commit_dates = [point["date"] for point in commit_series]
-        commit_trend = {
-            "series": commit_series,
-            "dates": commit_dates,
-            "today": commit_dates[-1] if commit_dates else None,
-        }
-        commit_journey_index = build_journey_index(fine_history, commit_dates)
+    # Where the history comes from, for the seed card's wording.
+    fine_kind = ("save" if git_commits is None else "commit") if log else None
 
     meta = glyph_meta(font)
     metas = [meta.get(name, {}) for name in glyph_names]
@@ -1023,14 +988,10 @@ def build_model(
             str(index): _hex(rgba) for index, rgba in enumerate(labelcolors.read_label_colors())
         },
         "filePath": font.filepath or "",
-        "favicon": _favicon_data_uri(),
         "logo": _family_logo(font),
         "trend": trend,
         "journeyIndex": journey_index,
-        "trendCommits": commit_trend,  # fine-grain set (git commits OR no-git saves)
-        "journeyIndexCommits": commit_journey_index,
-        "hasCommits": bool(commit_trend and len(commit_trend["series"]) >= 2),
-        "fineKind": fine_kind,  # "commit" | "save" | None (labels the toggle)
+        "fineKind": fine_kind,  # "commit" | "save" | None
         "lastEdit": glyph_last_edit(font, now),
         "coverage": build_coverage(font, current, order),
         "changes": compute_changes(current, previous),
