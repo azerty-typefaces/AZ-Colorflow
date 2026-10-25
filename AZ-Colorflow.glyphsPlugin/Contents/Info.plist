@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>plugin</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.hugojourdan.AZColorflow</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>AZ Colorflow</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1</string>
+	<key>CFBundleVersion</key>
+	<string>0.1</string>
+	<key>MinGlyphsVersion</key>
+	<integer>4</integer>
+	<key>UpdateFeedURL</key>
+	<string>https://raw.githubusercontent.com/azerty-typefaces/AZ-Colorflow/main/AZ-Colorflow.glyphsPlugin/Contents/Info.plist</string>
+	<key>productPageURL</key>
+	<string>https://github.com/azerty-typefaces/AZ-Colorflow</string>
+	<key>productReleaseNotes</key>
+	<string>AZ Colorflow for Glyphs 4: name and order your color-label steps in Settings, see each Font View sidebar row fill up as a color bar, group the Font View by color with Font Glyph Order, and color your selection from a wheel at the cursor. Replaces Color Flow: disable it.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright, HugoJourdan, 2022–2026</string>
+	<key>NSPrincipalClass</key>
+	<string>AZColorflowLoader</string>
+</dict>
+</plist>
