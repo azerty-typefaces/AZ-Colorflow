@@ -787,6 +787,17 @@ def _register_fontview_row_bars() -> None:
 _GLYPH_ORDER_REFRESHER = None
 
 
+def _front_font() -> Any:
+    # Glyphs.font blocks the main thread ~6 ms, nearly all of it waiting; the main
+    # window's own font is free. Glyphs.font still answers when that window isn't a
+    # font's (Macro Panel, Settings, the report).
+    window = AppKit.NSApplication.sharedApplication().mainWindow()
+    controller = window.windowController() if window is not None else None
+    if controller is not None and controller.respondsToSelector_(b"documentFont"):
+        return controller.documentFont()
+    return Glyphs.font
+
+
 class _AZGlyphOrderRefresher(NSObject):
     """Rebuilds the front font's Font Glyph Order when its master or a selected glyph's
     color changes, or the steps change in Settings. Debounced: a burst of interface
@@ -820,7 +831,7 @@ class _AZGlyphOrderRefresher(NSObject):
         self.performSelector_withObject_afterDelay_("glyphOrderCheck:", None, 0.15)
 
     def glyphOrderCheck_(self, sender: Any) -> None:
-        font = Glyphs.font
+        font = _front_font()
         try:
             if font is None or not fontview.is_enabled(font) or not fontview.is_dirty(font):
                 return
