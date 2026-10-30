@@ -790,49 +790,44 @@ _GLYPH_ORDER_REFRESHER = None
 class _AZGlyphOrderRefresher(NSObject):
     """Rebuilds the front font's Font Glyph Order when its master or a selected glyph's
     color changes, or the steps change in Settings. Debounced: a burst of interface
-    updates costs one rebuild."""
+    updates costs one check."""
 
     @objc.python_method
     def start(self) -> None:
-        self._pending = None
         Glyphs.addCallback(self.refreshInterface, UPDATEINTERFACE)
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self, "colorFlowSettingsChanged:", COLORFLOW_SETTINGS_CHANGED, None
         )
 
+    # Reading Glyphs.font blocks the main thread ~6 ms, too much on every interface
+    # update: look once the burst settles.
     @objc.python_method
     def refreshInterface(self, sender: Any) -> None:
-        font = Glyphs.font
-        try:
-            if font is None or not fontview.is_enabled(font):
-                return
-            if fontview.is_dirty(font):
-                self._schedule(font)
-        except Exception:
-            pass  # fires on every interface update: never spam the Macro panel
+        self._schedule()
 
     def colorFlowSettingsChanged_(self, notification: Any) -> None:
         # Step names or order changed: regroup although no color moved. Other open
         # fonts regroup when they next come to the front.
         for other in Glyphs.fonts:
             del other.tempData[fontview.SNAPSHOT_KEY]
-        font = Glyphs.font
-        if font is not None and fontview.is_enabled(font):
-            self._schedule(font)
+        self._schedule()
 
     @objc.python_method
-    def _schedule(self, font: Any) -> None:
-        self._pending = font
+    def _schedule(self) -> None:
         NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
-            self, "glyphOrderRebuild:", None
+            self, "glyphOrderCheck:", None
         )
-        self.performSelector_withObject_afterDelay_("glyphOrderRebuild:", None, 0.15)
+        self.performSelector_withObject_afterDelay_("glyphOrderCheck:", None, 0.15)
 
-    def glyphOrderRebuild_(self, sender: Any) -> None:
-        font, self._pending = self._pending, None
+    def glyphOrderCheck_(self, sender: Any) -> None:
+        font = Glyphs.font
         try:
-            if font is not None and fontview.is_enabled(font):
-                fontview.rebuild(font)
+            if font is None or not fontview.is_enabled(font) or not fontview.is_dirty(font):
+                return
+        except Exception:
+            return  # follows every burst of interface updates: never spam the Macro panel
+        try:
+            fontview.rebuild(font)
         except Exception:
             _report("Font Glyph Order")
 
